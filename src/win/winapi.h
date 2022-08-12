@@ -4076,6 +4076,10 @@
 # define STATUS_HASH_NOT_PRESENT ((NTSTATUS) 0xC000A101L)
 #endif
 
+#ifndef OBJ_CASE_INSENSITIVE
+# define OBJ_CASE_INSENSITIVE (0x00000040)
+#endif
+
 /* This is not the NTSTATUS_FROM_WIN32 that the DDK provides, because the DDK
  * got it wrong! */
 #ifdef NTSTATUS_FROM_WIN32
@@ -4436,6 +4440,22 @@ typedef struct _SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION {
     ULONG InterruptCount;
 } SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION, *PSYSTEM_PROCESSOR_PERFORMANCE_INFORMATION;
 
+typedef struct _OBJECT_ATTRIBUTES {
+  ULONG Length;
+  HANDLE RootDirectory;
+  PUNICODE_STRING ObjectName;
+  ULONG Attributes;
+  PVOID SecurityDescriptor;
+  PVOID SecurityQualityOfService;
+} OBJECT_ATTRIBUTES;
+typedef OBJECT_ATTRIBUTES *POBJECT_ATTRIBUTES;
+
+typedef struct _RTL_RELATIVE_NAME {
+	UNICODE_STRING RelativeName;
+	HANDLE         ContainingDirectory;
+	PVOID          CurDirRef;
+} RTL_RELATIVE_NAME, *PRTL_RELATIVE_NAME;
+
 #ifndef SystemProcessorPerformanceInformation
 # define SystemProcessorPerformanceInformation 8
 #endif
@@ -4596,6 +4616,20 @@ typedef NTSTATUS (NTAPI *sNtQueryInformationProcess)
                   ULONG Length,
                   PULONG ReturnLength);
 
+typedef NTSTATUS (NTAPI *sNtOpenFile)
+                 (PHANDLE FileHandle,
+                  ACCESS_MASK AccessMask,
+                  POBJECT_ATTRIBUTES ObjectAttributes,
+                  PIO_STATUS_BLOCK IoStatusBlock,
+                  ULONG ShareAccess,
+                  ULONG OpenOptions);
+
+typedef BOOLEAN (NTAPI *sRtlDosPathNameToRelativeNtPathName_U)
+	              (PCWSTR DosFileName,
+                 PUNICODE_STRING NtFileName,
+                 PWSTR* FilePath,
+                 PRTL_RELATIVE_NAME RelativeName);
+
 /*
  * Kernel32 headers
  */
@@ -4749,6 +4783,8 @@ extern sNtQueryVolumeInformationFile pNtQueryVolumeInformationFile;
 extern sNtQueryDirectoryFile pNtQueryDirectoryFile;
 extern sNtQuerySystemInformation pNtQuerySystemInformation;
 extern sNtQueryInformationProcess pNtQueryInformationProcess;
+extern sNtOpenFile pNtOpenFile;
+extern sRtlDosPathNameToRelativeNtPathName_U pRtlDosPathNameToRelativeNtPathName_U;
 
 /* Kernel32 function pointers */
 extern sGetQueuedCompletionStatusEx pGetQueuedCompletionStatusEx;

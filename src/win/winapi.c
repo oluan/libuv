@@ -35,6 +35,8 @@ sNtQueryVolumeInformationFile pNtQueryVolumeInformationFile;
 sNtQueryDirectoryFile pNtQueryDirectoryFile;
 sNtQuerySystemInformation pNtQuerySystemInformation;
 sNtQueryInformationProcess pNtQueryInformationProcess;
+sNtOpenFile pNtOpenFile;
+sRtlDosPathNameToRelativeNtPathName_U pRtlDosPathNameToRelativeNtPathName_U;
 
 /* Kernel32 function pointers */
 sGetQueuedCompletionStatusEx pGetQueuedCompletionStatusEx;
@@ -116,6 +118,21 @@ void uv__winapi_init(void) {
   if (pNtQueryInformationProcess == NULL) {
     uv_fatal_error(GetLastError(), "GetProcAddress");
   }
+
+  pNtOpenFile = (sNtOpenFile) GetProcAddress(
+      ntdll_module,
+      "NtOpenFile");
+  if (pNtOpenFile == NULL) {
+    uv_fatal_error(GetLastError(), "GetProcAddress");
+  }
+
+  pRtlDosPathNameToRelativeNtPathName_U = (sRtlDosPathNameToRelativeNtPathName_U) GetProcAddress(
+      ntdll_module,
+      "RtlDosPathNameToRelativeNtPathName_U");
+  if (pNtOpenFile == NULL) {
+    uv_fatal_error(GetLastError(), "GetProcAddress");
+  }
+
 
   kernel32_module = GetModuleHandleA("kernel32.dll");
   if (kernel32_module == NULL) {

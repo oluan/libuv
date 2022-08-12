@@ -1707,9 +1707,11 @@ void fs__closedir(uv_fs_t* req) {
 INLINE static int fs__stat_handle(HANDLE handle, uv_stat_t* statbuf,
     int do_lstat) {
   FILE_ALL_INFORMATION file_info;
+  FILE_FULL_DIR_INFO file_info2;
   FILE_FS_VOLUME_INFORMATION volume_info;
   NTSTATUS nt_status;
   IO_STATUS_BLOCK io_status;
+  BOOL poc_control = FALSE;
 
   nt_status = pNtQueryInformationFile(handle,
                                       &io_status,
@@ -1718,9 +1720,32 @@ INLINE static int fs__stat_handle(HANDLE handle, uv_stat_t* statbuf,
                                       FileAllInformation);
 
   /* Buffer overflow (a warning status code) is expected here. */
-  if (NT_ERROR(nt_status)) {
+  if (NT_ERROR(nt_status)&& nt_status != STATUS_ACCESS_DENIED) {
     SetLastError(pRtlNtStatusToDosError(nt_status));
     return -1;
+  } else if (NT_ERROR(nt_status)) {
+    nt_status = 
+          // Maybe NtQueryInformationFile with FileBasicInformation
+          // also works here
+          // but we still need to call NtOpenFile
+          pNtQueryDirectoryFile(handle,
+            NULL,
+            NULL,
+            NULL,
+            &io_status,
+            &file_info2,
+            sizeof(FILE_FULL_DIR_INFO),
+            FileFullDirectoryInformation,
+            TRUE,
+            NULL,
+            FALSE);
+    
+    if (NT_ERROR(nt_status)) {
+      SetLastError(pRtlNtStatusToDosError(nt_status));
+      return -1;
+    }
+
+    poc_control = TRUE;
   }
 
   nt_status = pNtQueryVolumeInformationFile(handle,
@@ -1769,8 +1794,10 @@ INLINE static int fs__stat_handle(HANDLE handle, uv_stat_t* statbuf,
   * invoked via lstat, which seeks information about the link instead of its
   * target. Otherwise, reparse points must be treated as regular files.
   */
-  if (do_lstat &&
-      (file_info.BasicInformation.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+ if (do_lstat &&
+      (poc_control ?
+      (file_info2.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) :
+      (file_info.BasicInformation.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))) {
     /*
      * If reading the link fails, the reparse point is not a symlink and needs
      * to be treated as a regular file. The higher level lstat function will
@@ -1782,37 +1809,58 @@ INLINE static int fs__stat_handle(HANDLE handle, uv_stat_t* statbuf,
   }
 
   if (statbuf->st_mode == 0) {
-    if (file_info.BasicInformation.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+    if (
+      (poc_control ?
+        file_info2.FileAttributes & FILE_ATTRIBUTE_DIRECTORY :
+        file_info.BasicInformation.FileAttributes & FILE_ATTRIBUTE_DIRECTORY
+      )) {
       statbuf->st_mode |= _S_IFDIR;
       statbuf->st_size = 0;
     } else {
       statbuf->st_mode |= _S_IFREG;
-      statbuf->st_size = file_info.StandardInformation.EndOfFile.QuadPart;
+      statbuf->st_size = poc_control ? 
+        file_info2.EndOfFile.QuadPart : 
+        file_info.StandardInformation.EndOfFile.QuadPart;
     }
   }
 
-  if (file_info.BasicInformation.FileAttributes & FILE_ATTRIBUTE_READONLY)
+  if (
+    (poc_control ?
+    (file_info2.FileAttributes & FILE_ATTRIBUTE_READONLY) :
+    (file_info.BasicInformation.FileAttributes & FILE_ATTRIBUTE_READONLY)))
     statbuf->st_mode |= _S_IREAD | (_S_IREAD >> 3) | (_S_IREAD >> 6);
   else
     statbuf->st_mode |= (_S_IREAD | _S_IWRITE) | ((_S_IREAD | _S_IWRITE) >> 3) |
                         ((_S_IREAD | _S_IWRITE) >> 6);
 
   uv__filetime_to_timespec(&statbuf->st_atim,
+                           poc_control ?
+                           file_info2.LastAccessTime.QuadPart :
                            file_info.BasicInformation.LastAccessTime.QuadPart);
   uv__filetime_to_timespec(&statbuf->st_ctim,
+                           poc_control ?
+                           file_info2.ChangeTime.QuadPart :
                            file_info.BasicInformation.ChangeTime.QuadPart);
   uv__filetime_to_timespec(&statbuf->st_mtim,
+                           poc_control ?
+                           file_info2.LastWriteTime.QuadPart :
                            file_info.BasicInformation.LastWriteTime.QuadPart);
   uv__filetime_to_timespec(&statbuf->st_birthtim,
+                           poc_control ?
+                           file_info2.CreationTime.QuadPart :
                            file_info.BasicInformation.CreationTime.QuadPart);
 
-  statbuf->st_ino = file_info.InternalInformation.IndexNumber.QuadPart;
+  /* Note: not accessible with fallback */
+  statbuf->st_ino = poc_control ? 0 : file_info.InternalInformation.IndexNumber.QuadPart;
 
   /* st_blocks contains the on-disk allocation size in 512-byte units. */
   statbuf->st_blocks =
+    poc_control ?
+      (uint64_t) file_info2.AllocationSize.QuadPart >> 9 :
       (uint64_t) file_info.StandardInformation.AllocationSize.QuadPart >> 9;
 
-  statbuf->st_nlink = file_info.StandardInformation.NumberOfLinks;
+  /* Note: not accessible with fallback */
+  statbuf->st_nlink = poc_control ? 0 : file_info.StandardInformation.NumberOfLinks;
 
   /* The st_blksize is supposed to be the 'optimal' number of bytes for reading
    * and writing to the disk. That is, for any definition of 'optimal' - it's
@@ -1866,6 +1914,12 @@ INLINE static DWORD fs__stat_impl_from_path(WCHAR* path,
   HANDLE handle;
   DWORD flags;
   DWORD ret;
+  NTSTATUS status;
+  IO_STATUS_BLOCK ioStatusBlock;
+  OBJECT_ATTRIBUTES objAttributes;
+  UNICODE_STRING NtName;
+  PCWSTR PartName;
+  RTL_RELATIVE_NAME RelativeName;
 
   flags = FILE_FLAG_BACKUP_SEMANTICS;
   if (do_lstat)
@@ -1879,9 +1933,33 @@ INLINE static DWORD fs__stat_impl_from_path(WCHAR* path,
                        flags,
                        NULL);
 
-  if (handle == INVALID_HANDLE_VALUE)
-    return GetLastError();
+ if (handle == INVALID_HANDLE_VALUE) {
+    ret = GetLastError();
+    if (ret == ERROR_ACCESS_DENIED) {
+      ret = pRtlDosPathNameToRelativeNtPathName_U(path, &NtName, &PartName, &RelativeName);
 
+      USHORT len = (WORD)PartName - LOWORD(NtName.Buffer);
+
+      NtName.MaximumLength = len;
+      NtName.Length = len;
+
+      objAttributes.RootDirectory = RelativeName.ContainingDirectory;
+      objAttributes.Length = 48;
+      objAttributes.Attributes = OBJ_CASE_INSENSITIVE;
+      objAttributes.ObjectName = &NtName;
+      objAttributes.SecurityDescriptor = NULL;
+      objAttributes.SecurityQualityOfService = NULL;
+
+      status = pNtOpenFile(&handle, FILE_READ_DATA | SYNCHRONIZE, &objAttributes, &ioStatusBlock,
+                            FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE, 
+                            0x1 | 0x4000 | FILE_SYNCHRONOUS_IO_NONALERT);
+
+      if (NT_ERROR(status)) {
+        return GetLastError();
+      }
+    }
+  }
+  
   if (fs__stat_handle(handle, statbuf, do_lstat) != 0)
     ret = GetLastError();
   else
